@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VOID LURKER - Josh Fixed</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Courier New', Courier, monospace; user-select: none; touch-action: none; }
+        #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.95); color: #ff0000; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; cursor: pointer; text-align: center; }
+        #ui { position: absolute; bottom: 20px; left: 20px; color: #fff; z-index: 5; pointer-events: none; text-shadow: 2px 2px 4px #000; }
+        #minimap-container { position: absolute; top: 20px; right: 20px; width: 180px; height: 180px; background: rgba(0, 0, 0, 0.8); border: 2px solid #444; border-radius: 50%; z-index: 10; overflow: hidden; }
+        #minimap-canvas { width: 100%; height: 100%; }
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 10px; height: 10px; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 50%; transform: translate(-50%, -50%); z-index: 5; pointer-events: none; }
+        #status-message { position: absolute; top: 20%; width: 100%; text-align: center; color: #ff0000; font-size: 2.5em; display: none; z-index: 5; text-shadow: 0 0 20px #ff0000; font-weight: bold; animation: pulse 0.3s infinite alternate; }
+        @keyframes pulse { from { opacity: 0.4; transform: scale(1); } to { opacity: 1; transform: scale(1.1); } }
+        
+        #jumpscare { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: none; z-index: 1000; justify-content: center; align-items: center; background: #000; overflow: hidden; }
+        #jumpscare-text { color: #ff0000; font-size: 10vw; font-weight: 900; position: absolute; animation: glitch 0.1s infinite; text-align: center; text-transform: uppercase; }
+        @keyframes glitch {
+            0% { transform: translate(0); }
+            25% { transform: translate(-15px, 10px) skewX(10deg); color: #fff; }
+            50% { transform: translate(15px, -10px) scale(1.1); }
+            75% { transform: translate(-5px, 5px) skewY(-5deg); color: #ff0000; }
+            100% { transform: translate(0); }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="overlay">
+        <h1 style="font-size: 4em; margin-bottom: 5px; letter-spacing: 5px;">VOID LURKER</h1>
+        <p>ZNAJDŹ 12 RDZENI I WRÓĆ DO PORTALU</p>
+        <p style="font-size: 0.8em; color: #444; margin-top: 20px;">KLIKNIJ ABY ROZPOCZĄĆ</p>
+    </div>
+
+    <div id="ui">RDZENIE: <span id="counter">0</span>/12</div>
+    <div id="minimap-container"><canvas id="minimap-canvas"></canvas></div>
+    <div id="status-message">PORTAL OTWARTY! UCIEKAJ DO STARTU!</div>
+    <div id="crosshair"></div>
+    
+    <div id="jumpscare">
+        <h2 id="jumpscare-text">NIE UCIEKNIESZ</h2>
+    </div>
+
+    <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+        const TARGET_SCORE = 12;
+        const MAP_SIZE = 30;
+        const CELL_SIZE = 15;
+        const PLAYER_HEIGHT = 2.0;
+        const GRAVITY = 35.0;
+        const JUMP_FORCE = 12.0;
+
+        let scene, camera, renderer, controls, flashlight;
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+        let score = 0, isGameOver = false, canJump = false, phase2 = false;
+        let enemy, portal, mapData = [], collectibles = [];
+        let velocity = new THREE.Vector3();
+        let clock = new THREE.Clock();
+        let minimapCanvas, minimapCtx;
+        let audioCtx;
+
+        function initAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+
+        function playScream() {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(phase2 ? 250 : 120, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(10, audioCtx.currentTime + 1.2);
+            gain.gain.setValueAtTime(0.6, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 1.2);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 1.2);
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.05);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            minimapCanvas = document.getElementById('minimap-canvas');
+            minimapCanvas.width = 180; minimapCanvas.height = 180;
+            minimapCtx = minimapCanvas.getContext('2d');
+
+            controls = new PointerLockControls(camera, document.body);
+            document.getElementById('overlay').addEventListener('click', () => {
+                initAudio();
+                controls.lock();
+            });
+            controls.addEventListener('lock', () => document.getElementById('overlay').style.display = 'none');
+            controls.addEventListener('unlock', () => { if(!isGameOver) document.getElementById('overlay').style.display = 'flex'; });
+
+            flashlight = new THREE.SpotLight(0xffffff, 800, 80, Math.PI/7, 0.6, 1.2);
+            flashlight.castShadow = true;
+            scene.add(flashlight);
+            scene.add(flashlight.target);
+
+            createWorld();
+            spawnCollectibles();
+            createJoshInCode();
+
+            const onKey = (e, v) => {
+                if(e.code === 'KeyW') moveForward = v;
+                if(e.code === 'KeyS') moveBackward = v;
+                if(e.code === 'KeyA') moveLeft = v;
+                if(e.code === 'KeyD') moveRight = v;
+                if(e.code === 'Space' && v && canJump) { velocity.y = JUMP_FORCE; canJump = false; }
+            };
+            document.addEventListener('keydown', (e) => onKey(e, true));
+            document.addEventListener('keyup', (e) => onKey(e, false));
+
+            animate();
+        }
+
+        function createWorld() {
+            const floor = new THREE.Mesh(new THREE.PlaneGeometry(2000, 2000), new THREE.MeshPhongMaterial({color: 0x0a0a0a}));
+            floor.rotation.x = -Math.PI/2;
+            floor.receiveShadow = true;
+            scene.add(floor);
+
+            mapData = Array(MAP_SIZE).fill().map(() => Array(MAP_SIZE).fill(1));
+            let x = 1, y = 1;
+            for(let i=0; i<3000; i++) {
+                mapData[x][y] = 0;
+                let dir = Math.floor(Math.random()*4);
+                if(dir===0 && x<MAP_SIZE-2) x++; else if(dir===1 && x>1) x--;
+                else if(dir===2 && y<MAP_SIZE-2) y++; else if(dir===3 && y>1) y--;
+            }
+
+            const off = (MAP_SIZE * CELL_SIZE) / 2;
+            const wallGeo = new THREE.BoxGeometry(CELL_SIZE, 24, CELL_SIZE);
+            const wallMat = new THREE.MeshPhongMaterial({color: 0x030303});
+
+            for(let i=0; i<MAP_SIZE; i++) {
+                for(let j=0; j<MAP_SIZE; j++) {
+                    if(mapData[i][j] === 1) {
+                        const wall = new THREE.Mesh(wallGeo, wallMat);
+                        wall.position.set(i*CELL_SIZE - off, 12, j*CELL_SIZE - off);
+                        scene.add(wall);
+                    }
+                }
+            }
+            camera.position.set(offset(1), PLAYER_HEIGHT, offset(1));
+        }
+
+        function createJoshInCode() {
+            enemy = new THREE.Group();
+            
+            const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.8, 4, 4, 12), new THREE.MeshBasicMaterial({color: 0x000000}));
+            body.position.y = 2.5;
+            enemy.add(body);
+
+            const eGeo = new THREE.SphereGeometry(0.2, 8, 8);
+            const eMat = new THREE.MeshBasicMaterial({color: 0xff0000});
+            const e1 = new THREE.Mesh(eGeo, eMat); e1.position.set(0.35, 4.8, 0.6);
+            const e2 = new THREE.Mesh(eGeo, eMat); e2.position.set(-0.35, 4.8, 0.6);
+            enemy.add(e1, e2);
+            enemy.eyes = [e1, e2];
+
+            const l = new THREE.PointLight(0xff0000, 25, 20);
+            l.position.set(0, 4.5, 0.5);
+            enemy.add(l);
+            enemy.light = l;
+
+            scene.add(enemy);
+            
+            // SPAWN JOSHA NA SRODKU MAPY W WOLNYM MIEJSCU
+            let sx = Math.floor(MAP_SIZE/2);
+            let sy = Math.floor(MAP_SIZE/2);
+            // Szukaj najbliższego wolnego pola jeśli środek to ściana
+            while(mapData[sx][sy] === 1) {
+                sx += (Math.random() > 0.5 ? 1 : -1);
+                sy += (Math.random() > 0.5 ? 1 : -1);
+                sx = Math.max(1, Math.min(MAP_SIZE-2, sx));
+                sy = Math.max(1, Math.min(MAP_SIZE-2, sy));
+            }
+            enemy.position.set(offset(sx), 0, offset(sy));
+        }
+
+        function spawnPortal() {
+            portal = new THREE.Group();
+            const geo = new THREE.TorusKnotGeometry(4.5, 1.4, 120, 20);
+            const mat = new THREE.MeshBasicMaterial({color: 0xff0000, wireframe: true});
+            const mesh = new THREE.Mesh(geo, mat);
+            portal.add(mesh);
+            const pLight = new THREE.PointLight(0xff0000, 150, 60);
+            portal.add(pLight);
+            portal.position.set(offset(1), 5.5, offset(1));
+            scene.add(portal);
+        }
+
+        function spawnCollectibles() {
+            let placed = 0;
+            while(placed < 20) {
+                let rx = Math.floor(Math.random()*MAP_SIZE), ry = Math.floor(Math.random()*MAP_SIZE);
+                if(mapData[rx][ry] === 0 && !(rx===1 && ry===1)) {
+                    const c = new THREE.Group();
+                    c.add(new THREE.Mesh(new THREE.OctahedronGeometry(0.7), new THREE.MeshBasicMaterial({color: 0x00ffff})));
+                    c.add(new THREE.PointLight(0x00ffff, 12, 12));
+                    c.position.set(offset(rx), 1.5, offset(ry));
+                    scene.add(c);
+                    collectibles.push(c);
+                    placed++;
+                }
+            }
+        }
+
+        function offset(v) { return v * CELL_SIZE - (MAP_SIZE * CELL_SIZE / 2); }
+        function grid(v) { return Math.round((v + (MAP_SIZE * CELL_SIZE / 2)) / CELL_SIZE); }
+
+        function checkCollision(pos) {
+            const gx = grid(pos.x), gz = grid(pos.z);
+            if(gx<0||gx>=MAP_SIZE||gz<0||gz>=MAP_SIZE) return true;
+            return mapData[gx][gz] === 1;
+        }
+
+        function updateMinimap() {
+            const w = 180, s = w / MAP_SIZE;
+            minimapCtx.fillStyle = '#000';
+            minimapCtx.fillRect(0,0,w,w);
+
+            minimapCtx.save();
+            minimapCtx.translate(w/2, w/2);
+            const rotation = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ');
+            minimapCtx.rotate(rotation.y); 
+            minimapCtx.translate(-grid(camera.position.x)*s, -grid(camera.position.z)*s);
+
+            for(let i=0; i<MAP_SIZE; i++) {
+                for(let j=0; j<MAP_SIZE; j++) {
+                    if(mapData[i][j]===1) {
+                        minimapCtx.fillStyle = '#222';
+                        minimapCtx.fillRect(i*s, j*s, s, s);
+                    }
+                }
+            }
+
+            collectibles.forEach(c => {
+                minimapCtx.fillStyle = '#0ff';
+                minimapCtx.fillRect(grid(c.position.x)*s+2, grid(c.position.z)*s+2, s-4, s-4);
+            });
+
+            if(portal) {
+                minimapCtx.fillStyle = '#f00';
+                minimapCtx.fillRect(grid(portal.position.x)*s, grid(portal.position.z)*s, s, s);
+            }
+
+            minimapCtx.fillStyle = phase2 ? '#fff' : '#f00';
+            minimapCtx.beginPath();
+            minimapCtx.arc(grid(enemy.position.x)*s+s/2, grid(enemy.position.z)*s+s/2, s/2, 0, Math.PI*2);
+            minimapCtx.fill();
+
+            minimapCtx.restore();
+            minimapCtx.fillStyle = '#fff';
+            minimapCtx.beginPath();
+            minimapCtx.moveTo(w/2, w/2 - 10);
+            minimapCtx.lineTo(w/2 + 7, w/2 + 7);
+            minimapCtx.lineTo(w/2 - 7, w/2 + 7);
+            minimapCtx.fill();
+        }
+
+        function getPath(start, end) {
+            const s = {x:grid(start.x), y:grid(start.z)}, e = {x:grid(end.x), y:grid(end.z)};
+            const open = [{...s, g:0, h:Math.abs(s.x-e.x)+Math.abs(s.y-e.y), p:null}], closed = new Set();
+            let limit = 0;
+            while(open.length > 0 && limit < 500) {
+                limit++;
+                open.sort((a,b) => (a.g+a.h)-(b.g+b.h));
+                const c = open.shift();
+                if(c.x===e.x && c.y===e.y) {
+                    const res = []; let t = c;
+                    while(t.p) { res.push(new THREE.Vector3(offset(t.x), 0, offset(t.y))); t = t.p; }
+                    return res.reverse();
+                }
+                closed.add(`${c.x},${c.y}`);
+                for(let n of [{x:c.x+1,y:c.y},{x:c.x-1,y:c.y},{x:c.x,y:c.y+1},{x:c.x,y:c.y-1}]) {
+                    if(n.x<0||n.x>=MAP_SIZE||n.y<0||n.y>=MAP_SIZE||mapData[n.x][n.y]===1||closed.has(`${n.x},${n.y}`)) continue;
+                    const g = c.g+1, h = Math.abs(n.x-e.x)+Math.abs(n.y-e.y);
+                    if(!open.find(o=>o.x===n.x&&o.y===n.y)) open.push({...n, g, h, p:c});
+                }
+            }
+            return [];
+        }
+
+        let path = [], pathTime = 0;
+        function animate() {
+            requestAnimationFrame(animate);
+            if(isGameOver) return;
+            const delta = Math.min(clock.getDelta(), 0.1);
+
+            if(controls.isLocked) {
+                velocity.y -= GRAVITY * delta;
+                const speed = (phase2 ? 70.0 : 45.0) * delta;
+                const dir = new THREE.Vector3();
+                if(moveForward) dir.z -= 1; if(moveBackward) dir.z += 1;
+                if(moveLeft) dir.x -= 1; if(moveRight) dir.x += 1;
+                dir.normalize().applyQuaternion(camera.quaternion); dir.y = 0;
+
+                const nextX = camera.position.clone().add(new THREE.Vector3(dir.x * speed, 0, 0));
+                if(!checkCollision(nextX)) camera.position.x = nextX.x;
+                const nextZ = camera.position.clone().add(new THREE.Vector3(0, 0, dir.z * speed));
+                if(!checkCollision(nextZ)) camera.position.z = nextZ.z;
+
+                camera.position.y += velocity.y * delta;
+                if(camera.position.y < PLAYER_HEIGHT) { camera.position.y = PLAYER_HEIGHT; velocity.y = 0; canJump = true; }
+            }
+
+            flashlight.position.copy(camera.position);
+            const fTarget = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+            flashlight.target.position.copy(camera.position).add(fTarget);
+
+            // Josh AI
+            pathTime += delta;
+            if(pathTime > 0.3) { pathTime = 0; path = getPath(enemy.position, camera.position); }
+            if(path.length > 0) {
+                const step = path[0], d = new THREE.Vector3().subVectors(step, enemy.position);
+                const curSpeed = phase2 ? 14.5 : 7.8;
+                if(d.length() < 0.5) path.shift();
+                else enemy.position.add(d.normalize().multiplyScalar(curSpeed * delta));
+            }
+            enemy.lookAt(camera.position.x, 0, camera.position.z);
+
+            // FAZA 2 - EFEKTY WIZUALNE
+            if(phase2) {
+                const s = Math.sin(Date.now() * 0.01) * 0.5 + 0.5;
+                enemy.light.intensity = 50 + (s * 50);
+                enemy.eyes.forEach(e => e.material.color.set(s > 0.5 ? 0xffffff : 0xffff00));
+            }
+
+            // Collectibles logic
+            for(let i=collectibles.length-1; i>=0; i--) {
+                if(camera.position.distanceTo(collectibles[i].position) < 2.5) {
+                    scene.remove(collectibles[i]); collectibles.splice(i, 1); score++;
+                    document.getElementById('counter').innerText = score;
+                    if(score === TARGET_SCORE && !phase2) {
+                        phase2 = true;
+                        spawnPortal();
+                        document.getElementById('status-message').style.display = 'block';
+                    }
+                }
+            }
+
+            // Portal Victory
+            if(portal && camera.position.distanceTo(portal.position) < 4.5) {
+                isGameOver = true;
+                controls.unlock();
+                alert("WYGRANA! UCIEKŁEŚ JOSHOWI!");
+                location.reload();
+            }
+
+            // Death Logic
+            if(camera.position.distanceTo(enemy.position) < 3.5) {
+                isGameOver = true;
+                controls.unlock();
+                playScream();
+                document.getElementById('jumpscare').style.display = 'flex';
+                setTimeout(() => location.reload(), 3000);
+            }
+
+            if(portal) portal.rotation.y += delta * 2.5;
+            updateMinimap();
+            renderer.render(scene, camera);
+        }
+        init();
+    </script>
+</body>
+</html>
