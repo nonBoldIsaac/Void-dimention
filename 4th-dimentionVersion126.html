@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>VOID LURKER - Josh Fixed</title>
+    <title>VOID LURKER - Josh escape</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Courier New', Courier, monospace; user-select: none; touch-action: none; }
         #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.95); color: #ff0000; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; cursor: pointer; text-align: center; }
@@ -187,10 +187,9 @@
 
             scene.add(enemy);
             
-            // SPAWN JOSHA NA SRODKU MAPY W WOLNYM MIEJSCU
             let sx = Math.floor(MAP_SIZE/2);
             let sy = Math.floor(MAP_SIZE/2);
-            // Szukaj najbliższego wolnego pola jeśli środek to ściana
+          
             while(mapData[sx][sy] === 1) {
                 sx += (Math.random() > 0.5 ? 1 : -1);
                 sy += (Math.random() > 0.5 ? 1 : -1);
